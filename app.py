@@ -49,9 +49,11 @@ def get_duration(video_path):
 # ---------------------------------------------------------------
 
 ACTIONS_SCHEMA = """
-Tum ek video editing assistant ho. User jo bhi Hindi/English mein bole,
-usko neeche diye actions mein se sabse sahi ek ya zyada actions mein
-convert karo. SIRF JSON return karo, kuch aur nahi.
+Tum ek video editing assistant ho. User KISI BHI bhasha mein bol sakta hai
+- Hindi, English, Spanish, French, Arabic, Chinese, ya duniya ki koi bhi
+bhasha - tumhe HAR bhasha samajhni hai aur usko neeche diye actions mein
+se sabse sahi ek ya zyada actions mein convert karna hai. SIRF JSON
+return karo, kuch aur nahi.
 
 Available actions:
 - trim: {"action": "trim", "from_start_seconds": number} ya {"action": "trim", "from_end_seconds": number}
@@ -233,7 +235,7 @@ def remove_background_video(video_path, out_path, progress=None):
     from rembg import remove, new_session
     import cv2
 
-    session = new_session("u2net")
+    session = new_session("u2netp")  # halka/tez model (u2net ki jagah)
     uid = uuid.uuid4().hex[:6]
     frames_dir = os.path.join(WORK_DIR, f"frames_{uid}")
     out_frames_dir = os.path.join(WORK_DIR, f"out_frames_{uid}")
@@ -242,11 +244,21 @@ def remove_background_video(video_path, out_path, progress=None):
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 24
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Speed ke liye: agar video badi hai, processing ke liye chhota kar do
+    max_dim = 480
+    scale = min(1.0, max_dim / max(orig_w, orig_h))
+    proc_w, proc_h = int(orig_w * scale), int(orig_h * scale)
+
     frame_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+        if scale < 1.0:
+            frame = cv2.resize(frame, (proc_w, proc_h))
         cv2.imwrite(os.path.join(frames_dir, f"f_{frame_count:05d}.png"), frame)
         frame_count += 1
     cap.release()
@@ -254,13 +266,15 @@ def remove_background_video(video_path, out_path, progress=None):
     for i in range(frame_count):
         with open(os.path.join(frames_dir, f"f_{i:05d}.png"), "rb") as f_in:
             result = remove(f_in.read(), session=session)
-        with open(os.path.join(out_frames_dir, f"f_{i:05d}.png"), "wb") as f_out:
+        out_frame_path = os.path.join(out_frames_dir, f"f_{i:05d}.png")
+        with open(out_frame_path, "wb") as f_out:
             f_out.write(result)
         if progress is not None:
             progress((i + 1) / frame_count, desc=f"Background remove: frame {i+1}/{frame_count}")
 
     cmd = ["ffmpeg", "-y", "-framerate", str(fps),
            "-i", os.path.join(out_frames_dir, "f_%05d.png"),
+           "-vf", f"scale={orig_w}:{orig_h}",
            "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path]
     run_ffmpeg(cmd)
     shutil.rmtree(frames_dir, ignore_errors=True)
@@ -468,184 +482,4 @@ def apply_single_action(video_path, action, progress=None, extra_file=None):
             faces = face_cascade.detectMultiScale(gray, 1.1, 5)
             for (x, y, fw, fh) in faces:
                 roi = frame[y:y+fh, x:x+fw]
-                roi = cv2.GaussianBlur(roi, (35, 35), 0)
-                frame[y:y+fh, x:x+fw] = roi
-            writer.write(frame)
-            frame_idx += 1
-            if progress is not None and frame_idx % 10 == 0:
-                pass  # progress skip for speed
-        cap.release()
-        writer.release()
-        # Original audio wapas jodo
-        cmd = ["ffmpeg", "-y", "-i", temp_video, "-i", video_path,
-               "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0?",
-               "-shortest", out_path]
-        run_ffmpeg(cmd)
-        os.remove(temp_video)
-
-    elif name == "remove_silence":
-        vf_af = "silenceremove=stop_periods=-1:stop_threshold=-35dB:stop_duration=0.3"
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-af", vf_af, out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "color_grade":
-        style = action.get("style", "cinematic")
-        presets = {
-            "cinematic": "curves=preset=darker,eq=contrast=1.1:saturation=0.9",
-            "warm": "eq=gamma_r=1.1:gamma_b=0.9:saturation=1.2",
-            "cool": "eq=gamma_b=1.15:gamma_r=0.9:saturation=1.1",
-            "teal_orange": "curves=preset=medium_contrast,eq=gamma_r=1.05:gamma_b=1.1:saturation=1.3",
-        }
-        vf = presets.get(style, presets["cinematic"])
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", vf, out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "sharpen":
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf",
-               "unsharp=5:5:1.0:5:5:0.0", out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "old_film":
-        vf = "curves=vintage,noise=alls=20:allf=t,vignette"
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", vf, out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "reverse":
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", "reverse", "-af", "areverse", out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "split_screen":
-        if not extra_file:
-            raise RuntimeError("Split screen ke liye dusri video bhi upload karo (neeche wale box mein).")
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", extra_file,
-               "-filter_complex",
-               "[0:v]scale=640:720[left];[1:v]scale=640:720[right];[left][right]hstack=inputs=2[v]",
-               "-map", "[v]", "-map", "0:a?", out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "add_music":
-        if not extra_file:
-            raise RuntimeError("Background music add karne ke liye music file bhi upload karo (neeche wale box mein).")
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", extra_file,
-               "-filter_complex",
-               "[0:a][1:a]amix=inputs=2:duration=first:weights=1 0.4[a]",
-               "-map", "0:v", "-map", "[a]", "-c:v", "copy", out_path]
-        run_ffmpeg(cmd)
-
-    elif name == "text_to_speech":
-        text = action.get("text", "")
-        if not text:
-            raise RuntimeError("Voiceover ke liye text batao kya bolna hai.")
-        import pyttsx3
-        tts_path = os.path.join(WORK_DIR, f"tts_{uid}.mp3")
-        engine = pyttsx3.init()
-        engine.save_to_file(text, tts_path)
-        engine.runAndWait()
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", tts_path,
-               "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-shortest", out_path]
-        run_ffmpeg(cmd)
-        os.remove(tts_path)
-
-    else:
-        return video_path  # koi change nahi
-
-    return out_path
-
-
-# ---------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------
-
-def apply_edit(video_path, instruction, extra_file, progress=gr.Progress()):
-    if video_path is None:
-        return None, "Pehle ek video upload karo."
-
-    extra_file_path = extra_file.name if extra_file is not None else None
-
-    progress(0, desc="Instruction samajh raha hoon...")
-
-    actions = None
-    used_llm = False
-    if GROQ_API_KEY:
-        actions = understand_instruction_with_llm(instruction)
-        if actions:
-            used_llm = True
-
-    if not actions:
-        actions = fallback_parse(instruction)
-
-    if not actions:
-        return None, (
-            "Instruction samajh nahi aaya. Thoda clearly batao, jaise:\n"
-            "- 'background hatao' / 'subtitles add karo' / 'blur karo'\n"
-            "- 'pehle 10 second kaato' / 'text likho Hello'\n"
-            "- 'speed 2x karo' / 'vintage effect lagao' / 'zoom karo'"
-        )
-
-    current_video = video_path
-    total = len(actions)
-    try:
-        for idx, action in enumerate(actions):
-            def sub_progress(frac, desc=""):
-                overall = (idx + frac) / total
-                progress(overall, desc=desc or f"Step {idx+1}/{total}")
-            current_video = apply_single_action(current_video, action, progress=sub_progress, extra_file=extra_file_path)
-
-        engine = "Groq AI (LLM ne samjha)" if used_llm else "Keyword matching"
-        msg = f"Ho gaya! ({engine}) Actions apply hue: " + ", ".join(a["action"] for a in actions)
-        return current_video, msg
-
-    except Exception as e:
-        return None, f"Error aa gaya: {str(e)}"
-
-
-with gr.Blocks(title="AI Video Editor - High Level") as demo:
-    gr.Markdown("# 🎬 AI Video Editor (High-Level, Free & Open Source)")
-    if GROQ_API_KEY:
-        gr.Markdown("✅ **Smart mode ON** — kaisi bhi bhasha mein bolo, AI samjhega.")
-    else:
-        gr.Markdown(
-            "⚠️ **Basic mode** — abhi sirf fixed keywords samajhta hai. "
-            "Smart mode on karne ke liye `GROQ_API_KEY` environment variable set karo."
-        )
-
-    with gr.Row():
-        with gr.Column():
-            video_input = gr.Video(label="Video Upload Karo")
-            extra_file_input = gr.File(
-                label="Extra file (optional) - split screen ke liye dusri video, ya background music ke liye audio",
-                file_types=["video", "audio"]
-            )
-            instruction_input = gr.Textbox(
-                label="Instruction Do (apni bhasha mein bolo)",
-                placeholder='Jaise: "background hatao aur subtitles bhi add kar do"',
-                lines=2
-            )
-            submit_btn = gr.Button("Edit Karo", variant="primary")
-
-        with gr.Column():
-            video_output = gr.File(label="Edited Output")
-            status_output = gr.Textbox(label="Status", interactive=False, lines=3)
-
-    submit_btn.click(
-        fn=apply_edit,
-        inputs=[video_input, instruction_input, extra_file_input],
-        outputs=[video_output, status_output]
-    )
-
-    gr.Markdown(
-        "### Yeh sab kar sakta hai\n"
-        "Background remove • Subtitles • Trim • Text overlay • Speed • Mute • "
-        "GIF • Audio extract • Black&white • Blur • Vintage • Vignette • Zoom • "
-        "Rotate • Square crop • Watermark • Fade in/out • Brightness • "
-        "**Stabilize (shaky video fix)** • **Green screen removal** • "
-        "**Face blur (privacy)** • **Silence remove** • "
-        "**Color grading (cinematic/warm/cool/teal-orange)** • Sharpen • Old film look • "
-        "**Reverse** • **Split screen (2 videos)** • **Background music add**\n\n"
-        "**Ek saath multiple bhi bol sakte ho** (Smart mode mein): "
-        "*'pehle 5 second kaato, phir cinematic color grade karo aur subtitles add karo'*"
-    )
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+                roi = c
