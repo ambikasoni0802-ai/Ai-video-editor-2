@@ -1,0 +1,6 @@
+gradio==5.27.0
+rembg==2.0.65
+opencv-python-headless==4.10.0.84
+onnxruntime==1.19.2
+faster-whisper==1.0.3
+pyttsx3==2.90
