@@ -26,6 +26,9 @@ os.makedirs(WORK_DIR, exist_ok=True)
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
+REELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reels")
+REEL_FILES = [os.path.join(REELS_DIR, f"reel{i}.mp4") for i in range(1, 7)]
+
 
 def run_ffmpeg(cmd):
     print("Running:", " ".join(cmd))
@@ -82,6 +85,12 @@ Available actions:
 - crossfade_transition: {"action": "crossfade_transition"}  (smooth transition, sirf do videos hon tab)
 - sharpen: {"action": "sharpen"}  (video ko sharp/clear banana)
 - old_film: {"action": "old_film"}  (purani film jaisa scratches/grain effect)
+- vfx_overlay: {"action": "vfx_overlay"}  (fire/smoke overlay video blend)
+- glitch: {"action": "glitch"}  (digital glitch/RGB split effect)
+- chromatic_aberration: {"action": "chromatic_aberration"}  (color fringe/lens distortion effect)
+- light_leak: {"action": "light_leak"}  (cinematic light leak/lens flare effect)
+- motion_blur: {"action": "motion_blur"}  (smooth cinematic motion blur)
+- make_reel: {"action": "make_reel", "duration_seconds": number}  (short reel)
 - reverse: {"action": "reverse"}  (video ulta chalana)
 - split_screen: {"action": "split_screen"}  (do videos ko side-by-side dikhana, sirf tab jab dusri video upload ho)
 - add_music: {"action": "add_music"}  (background music mix karna, sirf tab jab music file upload ho)
@@ -223,6 +232,18 @@ def fallback_parse(instruction):
         actions.append({"action": "split_screen"})
     elif any(w in text for w in ["music add", "background music", "gaana"]):
         actions.append({"action": "add_music"})
+    elif any(w in text for w in ["vfx", "fire effect", "smoke effect", "explosion"]):
+        actions.append({"action": "vfx_overlay"})
+    elif any(w in text for w in ["glitch"]):
+        actions.append({"action": "glitch"})
+    elif any(w in text for w in ["chromatic", "lens distortion", "color fringe"]):
+        actions.append({"action": "chromatic_aberration"})
+    elif any(w in text for w in ["light leak", "lens flare"]):
+        actions.append({"action": "light_leak"})
+    elif any(w in text for w in ["motion blur", "cinematic blur"]):
+        actions.append({"action": "motion_blur"})
+    elif any(w in text for w in ["reel banao", "reel bana do", "insta reel", "reels"]):
+        actions.append({"action": "make_reel", "duration_seconds": 20})
 
     return actions
 
@@ -560,6 +581,57 @@ def apply_single_action(video_path, action, progress=None, extra_file=None):
         run_ffmpeg(cmd)
         os.remove(tts_path)
 
+    elif name == "vfx_overlay":
+        if not extra_file:
+            raise RuntimeError(
+                "VFX ke liye ek overlay video chahiye (fire/smoke/explosion). "
+                "Pixabay ya Videezy se free overlay download karke 'Extra file' mein upload karo."
+            )
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", extra_file,
+               "-filter_complex",
+               "[1:v]scale=iw:ih[ovl];[0:v][ovl]blend=all_mode=screen:shortest=1",
+               "-map", "0:a?", out_path]
+        run_ffmpeg(cmd)
+
+    elif name == "glitch":
+        vf = (
+            "split[a][b];"
+            "[a]lutrgb=r=maxval:g=0:b=0[red];"
+            "[b]lutrgb=r=0:g=0:b=maxval[blue];"
+            "[red]setpts=PTS-0.02/TB[redd];"
+            "[blue]setpts=PTS+0.02/TB[blued];"
+            "[redd][blued]blend=all_mode=screen,"
+            "noise=alls=15:allf=t"
+        )
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-filter_complex", vf, out_path]
+        run_ffmpeg(cmd)
+
+    elif name == "chromatic_aberration":
+        vf = (
+            "split[a][b];"
+            "[a]lutrgb=g=0:b=0[r];"
+            "[b]lutrgb=r=0:g=0[bl];"
+            "[r]crop=iw-6:ih:6:0,pad=iw+6:ih:0:0[rs];"
+            "[bl]crop=iw-6:ih:0:0,pad=iw+6:ih:6:0[bls];"
+            "[rs][bls]blend=all_mode=screen"
+        )
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-filter_complex", vf, out_path]
+        run_ffmpeg(cmd)
+
+    elif name == "light_leak":
+        vf = (
+            "vignette=angle=PI/4,"
+            "curves=preset=increase_contrast,"
+            "eq=brightness=0.05:saturation=1.3"
+        )
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", vf, out_path]
+        run_ffmpeg(cmd)
+
+    elif name == "motion_blur":
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf",
+               "minterpolate=fps=60:mi_mode=blend", out_path]
+        run_ffmpeg(cmd)
+
     else:
         return video_path  # koi change nahi
 
@@ -743,182 +815,65 @@ UI_TEXT = {
 LANGUAGE_NAMES = list(UI_TEXT.keys())
 
 
+def apply_manual_edit(video_path, action_choice, number_val, text_val, style_val, extra_file, progress=gr.Progress()):
+    if video_path is None:
+        return None, "Pehle ek video upload karo."
+
+    extra_file_path = extra_file.name if extra_file is not None else None
+    number_val = number_val if number_val is not None else 0
+
+    action_map = {
+        "trim (start se)": {"action": "trim", "from_start_seconds": number_val},
+        "trim (end se)": {"action": "trim", "from_end_seconds": number_val},
+        "add_text": {"action": "add_text", "text": text_val or "Text"},
+        "speed": {"action": "speed", "factor": number_val or 1.5},
+        "mute": {"action": "mute"},
+        "to_gif": {"action": "to_gif"},
+        "extract_audio": {"action": "extract_audio"},
+        "grayscale": {"action": "grayscale"},
+        "remove_bg": {"action": "remove_bg"},
+        "subtitles": {"action": "subtitles"},
+        "blur": {"action": "blur", "strength": number_val or 15},
+        "vintage": {"action": "vintage"},
+        "vignette": {"action": "vignette"},
+        "zoom": {"action": "zoom", "factor": number_val or 1.3},
+        "rotate": {"action": "rotate", "degrees": number_val or 90},
+        "crop_square": {"action": "crop_square"},
+        "watermark_text": {"action": "watermark_text", "text": text_val or "My Video"},
+        "fade": {"action": "fade"},
+        "brightness": {"action": "brightness", "level": number_val or 0.2},
+        "stabilize": {"action": "stabilize"},
+        "greenscreen": {"action": "greenscreen"},
+        "face_blur": {"action": "face_blur"},
+        "remove_silence": {"action": "remove_silence"},
+        "color_grade": {"action": "color_grade", "style": style_val or "cinematic"},
+        "sharpen": {"action": "sharpen"},
+        "old_film": {"action": "old_film"},
+        "reverse": {"action": "reverse"},
+        "split_screen": {"action": "split_screen"},
+        "add_music": {"action": "add_music"},
+        "text_to_speech": {"action": "text_to_speech", "text": text_val or ""},
+        "vfx_overlay": {"action": "vfx_overlay"},
+        "glitch": {"action": "glitch"},
+        "chromatic_aberration": {"action": "chromatic_aberration"},
+        "light_leak": {"action": "light_leak"},
+        "motion_blur": {"action": "motion_blur"},
+    }
+
+    action = action_map.get(action_choice)
+    if not action:
+        return None, "Feature select nahi hua."
+
+    try:
+        progress(0.2, desc=f"{action_choice} ho raha hai...")
+        result_path = apply_single_action(video_path, action, progress=progress, extra_file=extra_file_path)
+        return result_path, f"Ho gaya! Manually apply kiya: {action_choice}"
+    except Exception as e:
+        return None, f"Error aa gaya: {str(e)}"
+
+
 with gr.Blocks(title="AI Video Editor - High Level") as demo:
     lang_state = gr.State("English")
-
-    gr.HTML("""
-    <style>
-    .vinu-hero {
-        width: 100%;
-        height: 190px;
-        overflow: hidden;
-        border-radius: 14px;
-        margin-bottom: 14px;
-        position: relative;
-    }
-    .vinu-hero-track {
-        display: flex;
-        width: 1100%;
-        height: 100%;
-        animation: vinu-slide 40s linear infinite;
-    }
-    .vinu-slide {
-        width: 100%;
-        height: 100%;
-        flex-shrink: 0;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        padding: 0 30px;
-        box-sizing: border-box;
-    }
-    .vinu-slide-tag {
-        color: rgba(255,255,255,0.85);
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-        margin-bottom: 8px;
-    }
-    .vinu-slide-title {
-        color: white;
-        font-size: 26px;
-        font-weight: 800;
-        margin-bottom: 6px;
-    }
-    .vinu-slide-sub {
-        color: rgba(255,255,255,0.9);
-        font-size: 14px;
-        font-weight: 500;
-    }
-    .vinu-logo-corner {
-        position: absolute;
-        top: 14px;
-        left: 20px;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        z-index: 5;
-    }
-    .vinu-logo-badge {
-        width: 30px;
-        height: 30px;
-        border-radius: 8px;
-        background: white;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 900;
-        font-size: 14px;
-        color: #4338CA;
-    }
-    .vinu-logo-name {
-        color: white;
-        font-size: 16px;
-        font-weight: 800;
-        text-shadow: 0 1px 3px rgba(0,0,0,0.3);
-    }
-    @keyframes vinu-slide {
-        0%   { transform: translateX(0%); }
-        9%   { transform: translateX(0%); }
-        10%  { transform: translateX(-9.0909%); }
-        19%  { transform: translateX(-9.0909%); }
-        20%  { transform: translateX(-18.1818%); }
-        29%  { transform: translateX(-18.1818%); }
-        30%  { transform: translateX(-27.2727%); }
-        39%  { transform: translateX(-27.2727%); }
-        40%  { transform: translateX(-36.3636%); }
-        49%  { transform: translateX(-36.3636%); }
-        50%  { transform: translateX(-45.4545%); }
-        59%  { transform: translateX(-45.4545%); }
-        60%  { transform: translateX(-54.5454%); }
-        69%  { transform: translateX(-54.5454%); }
-        70%  { transform: translateX(-63.6363%); }
-        79%  { transform: translateX(-63.6363%); }
-        80%  { transform: translateX(-72.7272%); }
-        89%  { transform: translateX(-72.7272%); }
-        90%  { transform: translateX(-81.8181%); }
-        99%  { transform: translateX(-81.8181%); }
-        100% { transform: translateX(-90.9090%); }
-    }
-    </style>
-
-    <div class="vinu-hero">
-      <div class="vinu-logo-corner">
-        <div class="vinu-logo-badge">V</div>
-        <div class="vinu-logo-name">Vinu</div>
-      </div>
-      <div class="vinu-hero-track">
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#4338CA,#6D28D9);">
-          <div class="vinu-slide-tag">Background Removal</div>
-          <div class="vinu-slide-title">Video ka background hatao</div>
-          <div class="vinu-slide-sub">AI se automatic, bilkul free mein</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#0F766E,#0891B2);">
-          <div class="vinu-slide-tag">Auto Subtitles</div>
-          <div class="vinu-slide-title">Video mein subtitles add karo</div>
-          <div class="vinu-slide-sub">Awaz sun kar khud likh dega</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#B45309,#DC2626);">
-          <div class="vinu-slide-tag">Multi-Language</div>
-          <div class="vinu-slide-title">Kisi bhi bhasha mein bolo</div>
-          <div class="vinu-slide-sub">Hindi, English ya koi bhi - samajh jayega</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#1D4ED8,#7C3AED);">
-          <div class="vinu-slide-tag">Color Grading</div>
-          <div class="vinu-slide-title">Cinematic look do apni video ko</div>
-          <div class="vinu-slide-sub">Warm, cool, teal-orange styles</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#BE123C,#EA580C);">
-          <div class="vinu-slide-tag">Split Screen</div>
-          <div class="vinu-slide-title">2 videos side-by-side jodo</div>
-          <div class="vinu-slide-sub">Ek naya creative style</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#166534,#15803D);">
-          <div class="vinu-slide-tag">Background Music</div>
-          <div class="vinu-slide-title">Video mein music mix karo</div>
-          <div class="vinu-slide-sub">Apna gaana upload karo, mix ho jayega</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#7E22CE,#C026D3);">
-          <div class="vinu-slide-tag">Text to Speech</div>
-          <div class="vinu-slide-title">Likho aur awaz mein badlo</div>
-          <div class="vinu-slide-sub">Voiceover khud-ba-khud ban jayega</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#0369A1,#0284C7);">
-          <div class="vinu-slide-tag">Silence Removal</div>
-          <div class="vinu-slide-title">Khaali parts auto-hatao</div>
-          <div class="vinu-slide-sub">Video tight aur crisp ban jayegi</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#365314,#4D7C0F);">
-          <div class="vinu-slide-tag">Stabilize</div>
-          <div class="vinu-slide-title">Shaky video ko smooth karo</div>
-          <div class="vinu-slide-sub">Hilti hui video theek ho jayegi</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#9D174D,#DB2777);">
-          <div class="vinu-slide-tag">Speed &amp; Reverse</div>
-          <div class="vinu-slide-title">Fast, slow, ya ulta chalao</div>
-          <div class="vinu-slide-sub">Trim, crop, watermark - sab kuch</div>
-        </div>
-
-        <div class="vinu-slide" style="background:linear-gradient(120deg,#4338CA,#6D28D9);">
-          <div class="vinu-slide-tag">Background Removal</div>
-          <div class="vinu-slide-title">Video ka background hatao</div>
-          <div class="vinu-slide-sub">AI se automatic, bilkul free mein</div>
-        </div>
-
-      </div>
-    </div>
-    """)
 
     with gr.Row():
         lang_dropdown = gr.Dropdown(
@@ -943,12 +898,53 @@ with gr.Blocks(title="AI Video Editor - High Level") as demo:
                 label=UI_TEXT["English"]["extra_label"],
                 file_types=["video", "audio"]
             )
-            instruction_input = gr.Textbox(
-                label=UI_TEXT["English"]["instruction_label"],
-                placeholder=UI_TEXT["English"]["placeholder"],
-                lines=2
-            )
-            submit_btn = gr.Button(UI_TEXT["English"]["button"], variant="primary")
+
+            with gr.Tabs():
+                with gr.Tab("🤖 Smart Mode (AI)"):
+                    instruction_input = gr.Textbox(
+                        label=UI_TEXT["English"]["instruction_label"],
+                        placeholder=UI_TEXT["English"]["placeholder"],
+                        lines=2
+                    )
+                    submit_btn = gr.Button(UI_TEXT["English"]["button"], variant="primary")
+
+                with gr.Tab("🛠️ Manual Mode (khud se karo)"):
+                    gr.Markdown(
+                        "AI agar sahi se na kare, toh yahan se **khud** exact "
+                        "feature aur values choose karo."
+                    )
+                    manual_action = gr.Dropdown(
+                        label="Feature choose karo",
+                        choices=[
+                            "trim (start se)", "trim (end se)", "add_text",
+                            "speed", "mute", "to_gif", "extract_audio",
+                            "grayscale", "remove_bg", "subtitles", "blur",
+                            "vintage", "vignette", "zoom", "rotate",
+                            "crop_square", "watermark_text", "fade",
+                            "brightness", "stabilize", "greenscreen",
+                            "face_blur", "remove_silence", "color_grade",
+                            "sharpen", "old_film", "reverse",
+                            "split_screen", "add_music", "text_to_speech",
+                            "vfx_overlay", "glitch", "chromatic_aberration",
+                            "light_leak", "motion_blur",
+                        ],
+                        value="trim (start se)"
+                    )
+                    with gr.Row():
+                        manual_number = gr.Number(
+                            label="Number (seconds / factor / degrees / level)",
+                            value=5
+                        )
+                        manual_text = gr.Textbox(
+                            label="Text (agar zaroori ho - text overlay, watermark, TTS ke liye)",
+                            placeholder="Yahan text likho agar feature ko chahiye"
+                        )
+                    manual_style = gr.Dropdown(
+                        label="Color grade style (sirf color_grade ke liye)",
+                        choices=["cinematic", "warm", "cool", "teal_orange"],
+                        value="cinematic"
+                    )
+                    manual_submit_btn = gr.Button("Manually Edit Karo", variant="primary")
 
         with gr.Column():
             video_output = gr.File(label=UI_TEXT["English"]["output_label"])
@@ -979,6 +975,12 @@ with gr.Blocks(title="AI Video Editor - High Level") as demo:
         outputs=[video_output, status_output]
     )
 
+    manual_submit_btn.click(
+        fn=apply_manual_edit,
+        inputs=[video_input, manual_action, manual_number, manual_text, manual_style, extra_file_input],
+        outputs=[video_output, status_output]
+    )
+
     gr.Markdown(
         "### Yeh sab kar sakta hai / What this can do\n"
         "Background remove • Subtitles • Trim • Text overlay • Speed • Mute • "
@@ -989,7 +991,42 @@ with gr.Blocks(title="AI Video Editor - High Level") as demo:
         "**Color grading (cinematic/warm/cool/teal-orange)** • Sharpen • Old film look • "
         "**Reverse** • **Split screen** • **Background music**\n\n"
         "**Multi-language:** Type your instruction in ANY language — Hindi, English, "
-        "Spanish, Arabic, Chinese, or any other. The AI understands them all."
+        "Spanish, Arabic, Chinese, or any other. The AI understands them all.\n\n"
+        "**Manual Mode bhi hai** — agar AI sahi se na kare, 'Manual Mode' tab se "
+        "khud exact feature aur values choose kar sakte ho."
+    )
+
+    # -----------------------------------------------------------
+    # Reels section - Instagram-style scrollable tutorial reels
+    # -----------------------------------------------------------
+    gr.Markdown("---\n## 🎞️ Vinu Reels — Editing Tips")
+    gr.Markdown("App ke features ke baare mein chhoti reels dekho.")
+
+    reel_index_state = gr.State(0)
+    reel_player = gr.Video(
+        value=REEL_FILES[0], label="Reel 1/6", autoplay=True, loop=True
+    )
+    with gr.Row():
+        prev_reel_btn = gr.Button("⬆️ Peechhe")
+        next_reel_btn = gr.Button("⬇️ Aage")
+
+    def show_reel(index):
+        index = index % len(REEL_FILES)
+        return REEL_FILES[index], index, gr.update(label=f"Reel {index+1}/{len(REEL_FILES)}")
+
+    def next_reel(index):
+        return show_reel(index + 1)
+
+    def prev_reel(index):
+        return show_reel(index - 1)
+
+    next_reel_btn.click(
+        fn=next_reel, inputs=[reel_index_state],
+        outputs=[reel_player, reel_index_state, reel_player]
+    )
+    prev_reel_btn.click(
+        fn=prev_reel, inputs=[reel_index_state],
+        outputs=[reel_player, reel_index_state, reel_player]
     )
 
 if __name__ == "__main__":
